@@ -4672,14 +4672,6 @@ func (o *Object) uploadSinglepartPutObject(ctx context.Context, req *s3.PutObjec
 	if err != nil {
 		return etag, lastModified, nil, err
 	}
-	// If the reader claims to implement io.Seeker but can't actually seek
-	// (e.g., accounting.Account wrapping asyncreader.AsyncReader), strip the
-	// Seek method so the AWS SDK uses streaming checksums instead of seeking.
-	if seeker, ok := in.(io.Seeker); ok {
-		if _, err := seeker.Seek(0, io.SeekCurrent); err != nil {
-			in = struct{ io.Reader }{in}
-		}
-	}
 	req.Body = in
 	var options = []func(*s3.Options){}
 	if o.fs.opt.UseUnsignedPayload.Value {
