@@ -8,7 +8,9 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/tls"
+	"hash/crc32"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -4642,9 +4644,31 @@ func bufferForObjectLockMD5(req *s3.PutObjectInput, in io.Reader) (io.Reader, er
 	return bytes.NewReader(buf), nil
 }
 
+// bufferForCRC32C buffers the body, computes a CRC32C checksum, and sets
+// ChecksumAlgorithm + ChecksumCRC32C on the request. Buffering produces a
+// bytes.NewReader which is natively seekable, avoiding issues with the AWS
+// SDK requiring a seekable body when ChecksumAlgorithm is set.
+func bufferForCRC32C(req *s3.PutObjectInput, in io.Reader) (io.Reader, error) {
+	buf, err := io.ReadAll(in)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read body for CRC32C: %w", err)
+	}
+	crc := crc32.Checksum(buf, crc32.MakeTable(crc32.Castagnoli))
+	crcBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(crcBytes, crc)
+	crcBase64 := base64.StdEncoding.EncodeToString(crcBytes)
+	req.ChecksumAlgorithm = types.ChecksumAlgorithmCrc32c
+	req.ChecksumCRC32C = &crcBase64
+	return bytes.NewReader(buf), nil
+}
+
 // Upload a single part using PutObject
 func (o *Object) uploadSinglepartPutObject(ctx context.Context, req *s3.PutObjectInput, size int64, in io.Reader) (etag string, lastModified time.Time, versionID *string, err error) {
 	in, err = bufferForObjectLockMD5(req, in)
+	if err != nil {
+		return etag, lastModified, nil, err
+	}
+	in, err = bufferForCRC32C(req, in)
 	if err != nil {
 		return etag, lastModified, nil, err
 	}
@@ -4773,6 +4797,10 @@ func (o *Object) prepareUpload(ctx context.Context, src fs.ObjectInfo, options [
 	if err != nil {
 		return ui, fmt.Errorf("failed to read metadata from source object: %w", err)
 	}
+	if meta == nil {
+		meta = fs.Metadata{}
+	}
+	meta["written-from"] = "rclone"
 	ui.req.Metadata = make(map[string]string, len(meta)+2)
 	// merge metadata into request and user metadata
 	for k, v := range meta {
